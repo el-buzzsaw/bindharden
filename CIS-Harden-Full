@@ -1,0 +1,82 @@
+# Based on CIS Benchmark for BIND 9.9
+
+### DEFAULT VARIABLES ###
+# • $CONFIG_FILES – List of the primary configuration file and all included configuration files. Typically, /etc/named.conf and other included files. A recursive search for the “include” directive should locate all configuration files.
+# • $ZONE_FILES – All zone files referenced in the configuration files regardless of type. 
+# • $BIND_HOME - Directory under which BIND runs, typically /var/named or a chrooted equivalent.
+# • $RUNDIR – Directory for temporary run time files, typically /var/run, /run or or chrooted equivalent.
+# • $DYNDIR – Directory for managed keys which are dynamically updated. Typically, var/named/dynamic/ or a chrooted equivalent.
+# • $SLAVEDIR – Directory for dynamically updated slave zone files. Typically, /var/named/slaves/.
+# • $DATADIR – Directory for run time statistics.
+# • $LOGDIR – Directory for log files. Typically, /var/named/slaves/
+# • $TMPDIR – Directory for temporary files.
+
+
+### 2.1 - Run BIND as non-root user ###
+# Run the following commands to ensure the named account exists, and has been created with a UID greater than zero and less than MIN_UID.
+
+id named
+grep '^UID_MIN' /etc/login.defs
+
+# Verify that named service has been started and that the -u named option was passed when the daemon was executed, and that the user (first column) is equal to named.
+
+ps axu | grep named | grep -v 'grep'
+
+# Remediation:
+# Create the named user and group if it does not already exist. Using a shell of /dev/null is best practice.
+# Add the -u named to the OPTIONS parameters in the /etc/sysconfig/named if not already present.
+
+if ! id named; then
+ groupadd -g 53 named
+ useradd -m -u 53 -g 53 -c "BIND named" -d /var/named -s /dev/null named
+fi 2>/dev/null
+
+### 2.2 Give BIND user acct an invalid shell ###
+
+# Check the named login shell in the /etc/passwd file:
+# The named account shell must be /sbin/nologin or /dev/null similar to the entry shown
+
+grep named /etc/passwd
+
+# should return [[ named:x:25:25:Named:/var/named:/sbin/nologin ]] or similar
+
+# Remediation:
+# Change the named account to use the nologin shell as shown:
+
+chsh -s /sbin/nologin named
+
+### Lock BIND user account ###
+
+# Ensure the named account is locked using the following:
+
+passwd -S named
+
+# should return [[ named LK 2016-07-10 -1 -1 -1 -1 (Password locked.) ]] or similar
+
+### 2.4 Set root ownership of BIND directories ###
+
+# There should be NO directories listed in the output from the find command
+# $BIND_HOME should typically be set to /var/named
+# if chroot is used, it will be /var/named/chroot
+# $RUNDIR should be set to the directory which is used to create run-time files such as the pid file and session-key
+
+find $BIND_HOME $RUNDIR type d \! -user root -ls
+
+# Remediation:
+# To correct the directory ownership, perform the following:
+
+chown -R root $BIND_HOME $RUNDIR
+
+# Defaults:
+# The following directories are owned by named in the default RHEL7 package install
+# • /var/named/dynamic
+# • /var/named/slaves
+# • /var/named/data
+# • /run/named
+
+### 2.5 Set root ownership of BIND config files
+
+# Run the command below to ensure that all BIND configuration files are owned by root, except for those found in the run-time directories. Ensure that the BIND benchmark variables used below are set as described in the benchmark overview, as these variables identify the run-time directories
+
+find $BIND_HOME -type f \! -user root | egrep -v \\^$DYNDIR\|\^$SLAVEDIR\^$DATADIR\|\^$RUNDIR\|\^$LOGDIR\|\^$TMPDIR
+
