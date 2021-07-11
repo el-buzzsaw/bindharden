@@ -80,3 +80,259 @@ chown -R root $BIND_HOME $RUNDIR
 
 find $BIND_HOME -type f \! -user root | egrep -v \\^$DYNDIR\|\^$SLAVEDIR\^$DATADIR\|\^$RUNDIR\|\^$LOGDIR\|\^$TMPDIR
 
+# should be no outputs
+
+# Remediation:
+# Capture the output of the previous audit command to a file named nonrootfiles.txt and review any files not owned by root to ensure the files are necessary and are not expected run-time files. Delete any unnecessary files, and ensure any run-time files are being created in the appropriate run-time directory.
+
+find $BIND_HOME -type f \! -user root | egrep -v \\^$DYNDIR\|\^$SLAVEDIR\^$DATADIR\|\^$RUNDIR\|\^$LOGDIR\|\^$TMPDIR > \$TMPDIR/nonroot-files.txt
+
+# The remaining non-run-time files should be changed to be owned by root, with a command like the following:
+
+cat $TMPDIR/nonroot-files.txt | xargs chown root
+rm $TMPDIR/nonroot-files.txt
+
+### 2.6 Set Group named or root for BIND Directories / files ###
+
+# Ensure that the BIND benchmark variables used below are set as described in the benchmark overview
+
+find $BIND_HOME $RUNDIR \! \( -group root -o -group named \) -ls
+
+# Remediation
+
+chgrp -R named $BIND_HOME $RUNDIR
+
+### 2.7 Set Group or Other Permissions to Read-Only on Non-Runtime Directories ###
+
+# Ensure that the BIND benchmark variables used below are set as described in the benchmark overview
+# There should be no outputs from the following command:
+
+find $BIND_HOME -type d -perm /020 | egrep -vx $DYNDIR\|$SLAVEDIR\|$DATADIR\|$RUNDIR\|$LOGDIR\|$TMPDIR
+find $BIND_HOME $RUNDIR -type d -perm /002
+
+# Remediation
+# Review the purpose for the identified directories and either delete them if the directory is not needed, or change the permissions of the directory to not be writable by group or other.
+
+### 2.8 Set Group and Other permissions Read-Only for all BIND Files ###
+
+# Run the command below to ensure that all BIND files are read-only for group and other. Note that a chroot'ed directory will have some special files which may need to be writable.
+
+find $BIND_HOME $RUNDIR -type f -perm /022
+
+# Remediation
+# Review the purpose for the identified files and either delete them if the file is not needed, or change the permissions of the file to not be writable by group or other.
+# The following commands can be used to change the permissions of the appropriate files.
+
+find $BIND_HOME $RUNDIR -type f -perm /022 > $TMPDIR/write-files.txt
+xargs -a $TMPDIR/write-files.txt chmod go-w
+rm $TMPDIR/write-files.txt
+
+### 2.9 Isolate BIND with chroot'ed subdir ###
+
+# Run the following two commands to find the root directory of the currently running named process. If the named process is chroot'ed, then the listing will show a symbolic link to the chroot subdirectory. If process is not chroot'ed, then the symbolic link will point to the real root directory /.
+
+NAMEDPID=$(pidof named)
+ls -ld /proc/$NAMEDPID/root
+
+# Output should be [[ lrwxrwxrwx 1 named named 0 Sep 10 13:21 /proc/423/root -> /var/named/chroot ]] or similar
+
+# Remediation
+
+# Stop the named service and install the bind-chroot package to provide the chroot directories.
+
+systemctl stop named.service
+yum install bind-chroot
+
+# Edit the /etc/sysconfig/named configuration file to have a line similar to the one shown below that sets the ROOTDIR environment variable.
+
+ROOTDIR="/var/named/chroot"
+
+# Move all the configuration files and any master zone files into their respective directions under the subdirectory /var/named/chroot/
+# It may be helpful to create symbolic links from a couple of system /etc files such as /etc/named.conf and /etc/rndc.key to the real files in the chroot’ed subdirectory, so that utilities like rndc will work as expected. Do not create symbolic links or hard links from inside the chroot to external resources! Instead use symbolic links to point from the outside resources into the chroot.
+# [[ https://linuxize.com/post/how-to-create-symbolic-links-in-linux-using-the-ln-command/ ]]
+# Restart the named service and test the configuration.
+
+systemctl start named.service
+
+### 3.1 Ignore Unwanted Queries ###
+
+# BIND can be configured to ignore requests originating from specified network segments. This is accomplished by implementing the blackhole option in named.conf. It is recommended that this feature be implemented to ignore requests that originate outside of expected network segments.
+
+# Remediation:
+# Add a blackhole option for multicast and link local addresses, and all private RFC 1918 addresses that are not being used.
+
+blackhole {
+// Private RFC 1918 addresses
+10/8; 192.168/16; 172.16/12;
+// Multicast
+224/8;
+// Link Local
+169.254/16;
+};
+
+### 3.2 omitted ### 
+
+### 3.3 Restrict Query Origins ###
+
+# BIND can be configured to restrict access to its query services based on source IP address. It is recommended that the allow-query option be used to restrict access to only the networks authorized to use the name server.
+
+# Verify that the BIND configuration files contain a global allow-query option with only the predefined ACL localhost and an ACL of the explicitly authorized networks. 
+# For an external authoritative only name server, the authorized networks may be the ACL any which represents any IPv4 or IPV6 host, but for caching and internal name servers, the authorized_networks should be an ACL with an explicit list of networks. 
+# The name of the ACL does not have to be authorized_networks.
+
+grep allow-query $CONFIG_FILES
+ allow-query { localhost; authorized_networks };
+ 
+# Remediation:
+
+# Create an ACL for the authorized trusted networks in the named.conf file.
+
+acl authorized_networks { 10.10.32.0/24; 10.10.34.0/24; . . . };
+
+# Add the allow-query statement to the global options of the named.conf file with the localhost ACL and the authorized trusted networks ACL.
+
+allow-query { localhost; authorized_networks };
+
+### 3.4 Restrict Queries of the Cache ###
+
+# The BIND option allow-query-cache may be used to restrict or allow BIND to provide answers to queries from the current cache of previously resolved queries. An authoritative only name server should not allow cache queries, except from the localhost, A caching only name server should allow cache queries only from the list of authorized networks. 
+
+# Remediation
+# Use the previously defined an ACL named trusted_clients which will identify the networks which are expected to use the DNS caching server, and will be allowed to send
+DNS cache queries. 
+
+allow-query-cache { localhost; trusted_clients }
+
+### Section 4 TSIG Omitted ###
+
+### 5.1 Secure Authentication of Zone Transfers ###
+# BIND can be configured to respond only to authenticated transfer requests by using the allow-transfer statement with a key statement, that restricts the transfers to servers that provide a MAC using the named key.
+
+# Search all of the included configuration files and zone files for the allow-transfer option.
+
+grep -C 1 allow-transfer $CONFIG_FILES $ZONE_FILES
+
+# If there are no allow-transfer statements found, then the configuration allows zone transfers, and is not compliant.
+
+# If the only value in the address match list of all the allow-transfer statements is the value none, either with or without quotes, then the configuration is compliant. Examples output is shown below.
+
+allow-transfer { none; };
+allow-transfer {"none";};
+
+# If all of the address list values of the allow-transfer statements have the keyword "key" followed by a name, then the configuration is compliant.
+
+allow-transfer { key ns1-ns2.cisecurity.org.; key ns2-ns3.cisecurity.org.; };
+
+# If the predefined address value of any appears in the allow-transfer statement, then the configuration is not compliant. 
+# If any of the address list values contains ACL names, IP addresses or network ranges, then the configuration is also not compliant. 
+
+allow-transfer { any; }
+allow-transfer { key ns1-ns2.cisecurity.org.; 10.10.42.56; }
+
+# Additionally, it is possible to confirm if a transfer is allowed to an IP address without a key, by performing the following command on the system with the suspected allowed IP address. An error of Transfer failed is the expected result. If a list of resource records is returned, then the transfer was allowed without a key, and the configuration is non-compliant.
+
+dig @ns1.cisecurity.org cisecurity.org axfr; 
+; <<>> DiG 9.9 . . .
+; (1 server found)
+;; global options: +cmd
+; Transfer failed.
+
+### 6.1 Hide BIND Version String ###
+
+# Use the dig command shown below to query the chaos class TXT record on version.bind. If there is no output from the command, or if a value of No Info or None is returned then
+the configuration is compliant. 
+
+dig @ns1.cisecurity.org version.bind chaos txt | grep '^version.bind.' | grep TXT
+OUTPUT [[ version.bind. 0 CH TXT "No Info" ]]
+
+dig @ns2.cisecurity.org version.bind chaos txt | grep '^version.bind.' | grep TXT
+OUTPUT [[ ]]
+
+# Remediation:
+# Add or modify the version option to have a value of none in the BIND global options, as shown below.
+
+options {
+version none;
+. . .
+}
+
+
+### 7.3 Disable dnssec-accept-expired Option ###
+
+# The dnssec-accept-expired option allows BIND to accept expired signatures during validation. The option should be disabled so that expired signatures will not be accepted.
+
+# Verify the dnssec-accept-expired option is not present in the configuration files, or is set to a value of no.
+
+grep dnssec-accept-expired $INCLUDE_FILES
+
+# OUTPUT [[ /var/named/chroot/etc/named.conf: dnssec-accept-expired no; ]]
+
+# Remediation:
+# Change the dnssec-accept-expired option to have a value of no, or remove the option from the configuration files.
+
+
+### 8.2 Configure a Logging File Channel ###
+
+# Remediation:
+# In named.conf, configure a channel for a local security log file with the categories config, dnssec, network, security, updates, xfer-in and xfer-out. The local log file will be within the chroot directory.
+
+logging {
+. . .
+channel local_security_log {
+file "/var/run/named/secure.log" versions 10 size 20m;
+severity debug;
+print-time yes;
+};
+// Config file processing
+category config { local_security_log; };
+// Processing signed responses
+category dnssec { local_security_log; };
+// Network Operations
+category network { local_security_log; };
+// Approved or unapproved requests
+category security { local_security_log; };
+// dynamic updates
+category update { local_security_log; };
+// transfers to the name server
+category xfer-in { local_security_log; };
+// transfers from the name server
+category xfer-out { local_security_log; };
+// Optional debug log file, may be enabled dynamically.
+channel local_debug_log {
+file "/var/run/named/debug.log";
+severity dynamic;
+print-time yes;
+};
+category default { local_debug_log; };
+category general { local_debug_log; };
+};
+
+# Checks - 
+# Search the logging options of the configuration file for configured log files
+
+grep -C 4 channel $CONFIG_FILES | egrep '^\s+file\s+\"'
+
+[[ file "/var/log/named.log" versions 10 size 20m; ]]
+[[ file "/var/log/secure.log" versions 10 size 20m; ]]
+
+# Perform a security related event such as a denied zone transfer to generate a log entry.
+
+dig @ns2.cisecurity.org cisecurity.org axfr
+
+# Check the log file to verify the attempt was logged.
+
+tail /var/log/secure.log
+
+[[ 30-Sep-2016 08:54:58.664 client 10.11.214.113#38401 (cisecurity.org): zone transfer 'cisecurity.org/AXFR/IN' denied ]]
+
+### 8.4 disable HTTP Statistics Server ###
+
+# Verify that there is NOT a statistics channel statement:
+
+grep statistics-channel $CONFIG_FILES
+
+# No output is expected and confirms that the HTTP service is not enabled.
+
+# Remediation:
+# Remove the statistics-channel option from the configuration file.
+
